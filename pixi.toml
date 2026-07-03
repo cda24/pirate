@@ -4,7 +4,11 @@ platforms = ["win-64", "linux-64", "osx-arm64", "osx-64"]
 preview = ["pixi-build"]
 
 [dependencies] 
-pirate = { path = "." }
+python = ">3.11"
+pip = "*"
+
+[pypi-dependencies]
+pirate = { path = "." ,editable = true}
 
 [tasks] 
 
