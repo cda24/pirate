@@ -13,7 +13,3 @@ requires = ["hatchling"]
 channels = ["conda-forge"]
 platforms = ["osx-arm64"]
 
-[tool.pixi.pypi-dependencies]
-pirate = { path = ".", editable = true }
-
-[tool.pixi.tasks]
