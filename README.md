@@ -17,7 +17,7 @@ A collection of tools and functions to assist with data analysis of images in py
 
 * With pip:
     ```bash
-    pip install -e git+https://github.com/cda24/pirate
+    pip install git+https://github.com/cda24/pirate
     ```
 #### From source:
 1. Clone the repository:
