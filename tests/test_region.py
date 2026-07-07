@@ -17,10 +17,10 @@ def test_image():
 
 def test_rectangular_measurement(test_image):
     test_measurements = [
-        ROI(x=7, y=2, h=2, w=2, idx=1),
-        ROI(x=2, y=2, h=2, w=2, idx=5),
-        ROI(x=2, y=7, h=2, w=2, idx=20),
-        ROI(x=7, y=7, h=2, w=2, idx=100),
+        ROI(x=7, y=2, h=2, w=2, idx=1, kind="rectangle"),
+        ROI(x=2, y=2, h=2, w=2, idx=5, kind="rectangle"),
+        ROI(x=2, y=7, h=2, w=2, idx=20, kind="rectangle"),
+        ROI(x=7, y=7, h=2, w=2, idx=100, kind="rectangle"),
     ]
     valid = [1, 5, 20, 100]
     for v, M in zip(valid, test_measurements):

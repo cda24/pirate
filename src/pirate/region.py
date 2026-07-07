@@ -1,5 +1,5 @@
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 from typing import Literal
 
@@ -176,152 +176,6 @@ class ROI_base(ABC):
 
 
 @dataclass
-class RectangularROI(ROI_base):
-    """
-    Rectangular ROI defined by center coordinates and dimensions.
-
-    Attributes
-    ----------
-    x : int
-        X coordinate of center
-    y : int
-        Y coordinate of center
-    h : int
-        Height (Y dimension)
-    w : int
-        Width (X dimension)
-    idx : int, optional
-        Index/identifier for this ROI
-    """
-
-    x: int = 0
-    y: int = 0
-    h: int = 0
-    w: int = 0
-    idx: int = 0
-
-    def plot_coords(self) -> tuple:
-        """
-        Generate coordinates for plotting rectangular ROI.
-
-        Returns
-        -------
-        tuple
-            (x_coords, y_coords) forming a closed rectangle
-        """
-        x_min = self.x - self.w / 2
-        x_max = self.x + self.w / 2
-        y_min = self.y - self.h / 2
-        y_max = self.y + self.h / 2
-
-        return (x_min, x_max, x_max, x_min, x_min), (y_min, y_min, y_max, y_max, y_min)
-
-    def image_coords(self) -> tuple:
-        """
-        Generate pixel indices for extracting rectangular ROI from image.
-
-        Returns
-        -------
-        tuple
-            (y_slice, x_slice) for image[y_slice, x_slice]
-        """
-        x_min = int(self.x - self.w / 2)
-        x_max = int(self.x + self.w / 2)
-        y_min = int(self.y - self.h / 2)
-        y_max = int(self.y + self.h / 2)
-
-        return slice(y_min, y_max), slice(x_min, x_max)
-
-    def contains_point(self, x: float, y: float) -> bool:
-        """Check if point is within rectangular ROI."""
-        x_min = self.x - self.w / 2
-        x_max = self.x + self.w / 2
-        y_min = self.y - self.h / 2
-        y_max = self.y + self.h / 2
-
-        return x_min <= x <= x_max and y_min <= y <= y_max
-
-
-@dataclass
-class CircularROI(ROI_base):
-    """
-    Circular ROI defined by center coordinates and radius.
-
-    Attributes
-    ----------
-    x : int
-        X coordinate of center
-    y : int
-        Y coordinate of center
-    r : int
-        Radius of circle
-    idx : int, optional
-        Index/identifier for this ROI
-    """
-
-    x: int = 0
-    y: int = 0
-    r: int = 0
-    idx: int = 0
-
-    def plot_coords(self) -> tuple:
-        """
-        Generate coordinates for plotting circular ROI.
-
-        Returns
-        -------
-        tuple
-            (x_coords, y_coords) forming a circle
-        """
-        theta = np.linspace(0, 2 * np.pi, 100)
-        x_coords = self.x + self.r * np.cos(theta)
-        y_coords = self.y + self.r * np.sin(theta)
-
-        return x_coords, y_coords
-
-    def image_coords(self) -> tuple:
-        """
-        Generate pixel indices for extracting circular ROI from image.
-        Creates a bounding box and returns a mask.
-
-        Returns
-        -------
-        tuple
-            (y_mask, x_mask) boolean arrays for circular region
-        """
-        x_min = int(self.x - self.r)
-        x_max = int(self.x + self.r)
-        y_min = int(self.y - self.r)
-        y_max = int(self.y + self.r)
-
-        # Create coordinate grids
-        y_grid, x_grid = np.ogrid[y_min:y_max, x_min:x_max]
-
-        # Create circular mask
-        mask = (x_grid - self.x) ** 2 + (y_grid - self.y) ** 2 <= self.r**2
-
-        return mask
-
-    def _apply_func(self, im, func=np.mean) -> float:
-        """Override _apply_func for circular ROI using mask."""
-        mask = self.image_coords()
-        x_min = int(self.x - self.r)
-        y_min = int(self.y - self.r)
-
-        # Extract bounding box region
-        x_max = x_min + mask.shape[1]
-        y_max = y_min + mask.shape[0]
-
-        region = im[y_min:y_max, x_min:x_max]
-        return func(region[mask])
-
-    def contains_point(self, x: float, y: float) -> bool:
-        """Check if point is within circular ROI."""
-        dist = np.sqrt((x - self.x) ** 2 + (y - self.y) ** 2)
-        return dist <= self.r
-
-
-@dataclass
 class PolygonalROI(ROI_base):
     """
     Polygonal ROI defined by vertices.
@@ -334,7 +188,7 @@ class PolygonalROI(ROI_base):
         Index/identifier for this ROI
     """
 
-    vertices: np.ndarray = None
+    vertices: np.ndarray | list = None
     idx: int = None
 
     def __post_init__(self):
@@ -353,12 +207,17 @@ class PolygonalROI(ROI_base):
             (x_coords, y_coords) forming closed polygon
         """
         # Close the polygon by appending first vertex at end
-        x_coords = np.append(self.vertices[:, 0], self.vertices[0, 0])
-        y_coords = np.append(self.vertices[:, 1], self.vertices[0, 1])
+        x_coords = self.vertices[:, 0]
+        y_coords = self.vertices[:, 1]
+        if (self.vertices[0, 0] != self.vertices[-1, 0]) or (
+            self.vertices[0, 1] != self.vertices[-1, 1]
+        ):
+            x_coords = np.append(x_coords, self.vertices[0, 0])
+            y_coords = np.append(y_coords, self.vertices[0, 1])
 
         return x_coords, y_coords
 
-    def image_coords(self) -> tuple:
+    def image_coords(self, shape: tuple[int, int] | None = None) -> tuple:
         """
         Generate pixel coordinates for extracting polygonal ROI from image.
         Uses rasterization to create a mask.
@@ -370,12 +229,16 @@ class PolygonalROI(ROI_base):
         """
         from matplotlib.path import Path
 
-        # Get bounding box
-        x_min, y_min = self.vertices.min(axis=0).astype(int)
-        x_max, y_max = self.vertices.max(axis=0).astype(int)
+        if shape is None:
+            # Get bounding box
+            x_min, y_min = self.vertices.min(axis=0).astype(int)
+            x_max, y_max = self.vertices.max(axis=0).astype(int)
 
-        # Create coordinate grids
-        y_grid, x_grid = np.mgrid[y_min : y_max + 1, x_min : x_max + 1]
+            # Create coordinate grids
+            y_grid, x_grid = np.mgrid[y_min + 1 : y_max, x_min + 1 : x_max]
+        else:
+            y_grid, x_grid = np.mgrid[: shape[1], : shape[0]]
+
         points = np.column_stack((x_grid.ravel(), y_grid.ravel()))
 
         # Create polygon path and check containment
@@ -384,15 +247,19 @@ class PolygonalROI(ROI_base):
 
         return mask
 
-    def _apply_func(self, im, func=np.mean) -> float:
-        """Override _apply_func for polygonal ROI using mask."""
+    def region(self, im) -> np.ndarray:
         mask = self.image_coords()
         x_min, y_min = self.vertices.min(axis=0).astype(int)
 
         x_max = x_min + mask.shape[1]
         y_max = y_min + mask.shape[0]
 
-        region = im[y_min:y_max, x_min:x_max]
+        return im[y_min:y_max, x_min:x_max]
+
+    def _apply_func(self, im, func=np.mean) -> float:
+        """Override _apply_func for polygonal ROI using mask."""
+        mask = self.image_coords()
+        region = self.region(im)
         return func(region[mask])
 
     def contains_point(self, x: float, y: float) -> bool:
@@ -401,6 +268,48 @@ class PolygonalROI(ROI_base):
 
         path = Path(self.vertices)
         return path.contains_point((x, y))
+
+
+@dataclass
+class RectangularROI(PolygonalROI):
+    x: int = 0
+    y: int = 0
+    h: int = 0
+    w: int = 0
+    idx: int = 0
+    vertices: np.ndarray | list = field(init=False)
+
+    def __post_init__(self):
+        x_min = self.x - self.w / 2
+        x_max = self.x + self.w / 2
+        y_min = self.y - self.h / 2
+        y_max = self.y + self.h / 2
+
+        self.vertices = np.array(
+            [
+                [x_min, y_min],
+                [x_max, y_min],
+                [x_max, y_max],
+                [x_min, y_max],
+                [x_min, y_min],
+            ]
+        )
+
+
+@dataclass
+class CircularROI(PolygonalROI):
+    x: int = 0
+    y: int = 0
+    r: int = 0
+    idx: int = 0
+    vertices: np.ndarray | list = field(init=False)
+
+    def __post_init__(self):
+        theta = np.linspace(0, 2 * np.pi, 100)
+        x_coords = self.x + self.r * np.cos(theta)
+        y_coords = self.y + self.r * np.sin(theta)
+
+        self.vertices = np.array([x_coords, y_coords]).T
 
 
 if __name__ == "__main__":
