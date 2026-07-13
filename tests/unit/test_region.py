@@ -15,6 +15,17 @@ def test_image():
     return _m
 
 
+@pytest.fixture
+def test_image_large():
+    nx, ny = 100, 100
+    _m = np.ones((nx, ny))
+
+    _m[: nx // 2, : ny // 2] = 5
+    _m[nx // 2 :, : ny // 2] = 20
+    _m[nx // 2 :, ny // 2 :] = 100
+    return _m
+
+
 def test_rectangular_measurement(test_image):
     test_measurements = [
         ROI(x=7, y=2, h=2, w=2, idx=1, kind="rectangle"),
@@ -56,3 +67,15 @@ def test_poly_measurement(test_image):
         assert v == M.mean(test_image)
         assert v == M.min(test_image)
         assert v == M.max(test_image)
+
+
+def test_image_size_persistence(test_image, test_image_large):
+    ROI(image_size=test_image)
+    M1 = ROI(x=7, y=2, h=2, w=2, idx=1, kind="rectangle")
+    M2 = ROI(x=7, y=2, h=2, w=2, idx=1, kind="rectangle")
+    M3 = ROI(x=7, y=2, h=2, w=2, idx=1, kind="rectangle", image_size=test_image_large)
+
+    assert M1.image_size == M2.image_size
+    assert M1.image_size == test_image.shape
+    assert M1.image_size != M3.image_size
+    assert M2.image_size != M3.image_size

@@ -1,0 +1,17 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+pixi.lock
+
+# junk
+.vscode
+.pytest_cache
+src/pirate/__pycache__/*
+**/__pycache__
+
+**/*.pyc
+
+# dev
+examples/dev.ipynb
+examples/dev_region2.ipynb
+dev/
