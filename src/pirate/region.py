@@ -1,37 +1,72 @@
-import numpy as np
-from dataclasses import dataclass, field
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Literal
+from typing import Literal, Callable, Optional, Sequence, Tuple, Union
+
+import numpy as np
+from matplotlib.path import Path as MplPath
+
+Shape = Tuple[int, int]  # (rows, cols) == (H, W)
 
 
 class ROI:
+    current_image_size: Shape | None = None
+
     def __new__(
         cls,
         kind: Literal[
-            "rectangle", "rectangular", "circle", "circular", "poly", "polygon"
-        ] = "rectangle",
+            "polygon",
+            "rectangle",
+            "rectangular",
+            "circle",
+            "circular",
+            "poly",
+            "ellipse",
+        ] = None,
         idx: int | None = None,
+        image_size: Shape | np.ndarray | None = None,
         **kwargs,
     ):
+        if kind is None:
+            if image_size is not None:
+                cls.current_image_size = cls._as_shape(image_size)
+            return None
+
         kind_lower = kind.lower()
 
+        image_size = (
+            cls._as_shape(image_size)
+            if image_size is not None
+            else cls.current_image_size
+        )
+        kwargs.setdefault("image_size", image_size)
+
         match kind_lower:
-            case None:
-                pass
             case k if k in ["rectangle", "rectangular"]:
                 return cls._create_rectangle(idx, **kwargs)
 
             case k if k in ["circle", "circular"]:
                 return cls._create_circle(idx, **kwargs)
 
+            case k if k in ["ellipse"]:
+                return cls._create_ellipse(idx, **kwargs)
+
             case k if k in ["poly", "polygon"]:
-                return cls._create_polygon(idx, **kwargs)
+                return cls._create_poly(idx, **kwargs)
 
             case _:
                 raise ValueError(
                     f"Unknown ROI kind: '{kind}'. "
                     f"Must be 'rectangle', 'circular', or 'polygon'"
                 )
+
+    @staticmethod
+    def _as_shape(shape_or_array: Shape | np.ndarray | None) -> Shape | None:
+        if shape_or_array is None:
+            return None
+        if isinstance(shape_or_array, np.ndarray):
+            return shape_or_array.shape[:2]
+        return tuple(shape_or_array)
 
     @staticmethod
     def _create_rectangle(idx: int | None = None, **kwargs):
@@ -46,8 +81,13 @@ class ROI:
                 f"Missing: {', '.join(sorted(missing))}"
             )
 
-        return RectangularROI(
-            x=kwargs["x"], y=kwargs["y"], h=kwargs["h"], w=kwargs["w"], idx=idx
+        return RectROI(
+            x=kwargs["x"],
+            y=kwargs["y"],
+            h=kwargs["h"],
+            w=kwargs["w"],
+            idx=idx,
+            image_size=kwargs["image_size"],
         )
 
     @staticmethod
@@ -62,230 +102,352 @@ class ROI:
                 f"CircularROI requires parameters: {', '.join(sorted(required))}. "
                 f"Missing: {', '.join(sorted(missing))}"
             )
-
-        return CircularROI(x=kwargs["x"], y=kwargs["y"], r=kwargs["r"], idx=idx)
+        kwargs.setdefault("resolution", 100)
+        return CircleROI(
+            x=kwargs["x"],
+            y=kwargs["y"],
+            r=kwargs["r"],
+            resolution=kwargs["resolution"],
+            idx=idx,
+            image_size=kwargs["image_size"],
+        )
 
     @staticmethod
-    def _create_polygon(idx: int | None = None, **kwargs) -> "PolygonalROI":
-        """Create a PolygonalROI."""
-        if "vertices" not in kwargs:
+    def _create_ellipse(idx: int | None = None, **kwargs):
+        """Create a CircularROI."""
+        required = {"x", "y", "ra", "rb"}
+        provided = set(kwargs.keys())
+
+        if not required.issubset(provided):
+            missing = required - provided
             raise ValueError(
-                "PolygonalROI requires 'vertices' parameter as list or array"
+                f"CircularROI requires parameters: {', '.join(sorted(required))}. "
+                f"Missing: {', '.join(sorted(missing))}"
             )
+        kwargs.setdefault("resolution", 100)
+        return EllipseROI(
+            x=kwargs["x"],
+            y=kwargs["y"],
+            ra=kwargs["ra"],
+            rb=kwargs["rb"],
+            resolution=kwargs["resolution"],
+            idx=idx,
+            image_size=kwargs["image_size"],
+        )
 
-        vertices = kwargs["vertices"]
-
-        # Handle additional kwargs
+    @staticmethod
+    def _create_poly(idx: int | None = None, **kwargs):
+        if "vertices" not in kwargs:
+            raise ValueError("PolyROI requires 'vertices' parameter as list or array")
         extra_kwargs = {k: v for k, v in kwargs.items() if k != "vertices"}
+        return PolyROI(vertices=kwargs["vertices"], idx=idx, **extra_kwargs)
 
-        return PolygonalROI(vertices=vertices, idx=idx, **extra_kwargs)
 
+class ROI_BASE(ABC):
+    """Abstract base class for a single region of interest.
 
-@dataclass
-class ROI_base(ABC):
+    Subclasses implement only `bound` and `mask`; a idx/index identifies
+    each instance (e.g. for bookkeeping when you have many of these).
+
+    This is the layer that makes `CompositeROI` possible: a union/
+    difference/intersection of two regions generally isn't expressible as
+    a single vertex list, only as a combination of two masks — so it
+    subclasses `ROI` directly rather than `PolyROI`. Any future ROI that's
+    mask-only (freehand brush, segmentation output, ...) belongs here too.
     """
-    Abstract base class for Region of Interest (ROI) objects.
 
-    Defines common interface for different ROI shapes used in image processing.
+    def __init__(self, idx, image_size: Shape | np.ndarray | None = None):
+        self.idx = idx
+        self.image_size = self._as_shape(image_size) if image_size is not None else None
+        self._cached_mask = None
 
-    Attributes
-    ----------
-    idx : int, optional
-        Index/identifier for this ROI
-    """
+    def _cached_mask_for(self, shape: Shape):
+        if self._cached_mask is not None and self._cached_mask.shape == shape:
+            return self._cached_mask
+        return None
 
-    idx: int | None = None
+    def _cache_mask(self, shape: Shape, mask: np.ndarray):
+        if self.image_size == shape:
+            self._cached_mask = mask
+        return mask
+
+    @property
+    @abstractmethod
+    def bound(self) -> Tuple[int, int, int, int]:
+        """(row_min, row_max, col_min, col_max) — outer bounding rectangle.
+
+        Pure geometry: derived only from the ROI's own definition, never
+        from an array. Can extend past an actual array's edges — clip
+        against a real shape with `_clipped_bound` before slicing.
+        """
+        raise NotImplementedError
 
     @abstractmethod
-    def plot_coords(self) -> tuple:
+    def mask(self, shape_or_array: Union[Shape, np.ndarray]) -> np.ndarray:
+        """Boolean array, `shape_or_array`'s size, True inside the region."""
+        raise NotImplementedError
+
+    # ---- region processes ----
+
+    def isolate(self, array: np.ndarray) -> np.ndarray:
+        """ndarray, `array` size, product of mask * array"""
+        return self.mask(array) * array
+
+    def omit(self, array: np.ndarray) -> np.ndarray:
+        """ndarray, `array` size, product of !mask * array"""
+        return (self.mask(array) == 0) * array
+
+    def crop(self, array: np.ndarray, fill=np.nan) -> np.ndarray:
+        """ndarrray, `bound` extent size, invokes isolate then limits area"""
+        h, w = array.shape[:2]
+        r0, r1, c0, c1 = self.bound
+        r0, r1 = max(r0, 0), min(r1, h)
+        c0, c1 = max(c0, 0), min(c1, w)
+        sub = array[r0:r1, c0:c1].copy()
+        m = self.mask(array)[r0:r1, c0:c1]
+        sub[~m] = fill
+        return sub
+
+    # ---- composition: additive / subtractive / intersection ----
+    def __add__(self, other: "ROI_BASE") -> "CompositeROI":
+        return CompositeROI(self, other, "union")
+
+    def __sub__(self, other: "ROI_BASE") -> "CompositeROI":
+        return CompositeROI(self, other, "difference")
+
+    def __and__(self, other: "ROI_BASE") -> "CompositeROI":
+        return CompositeROI(self, other, "intersection")
+
+    # ---- small shared helpers ----
+    @staticmethod
+    def _as_shape(shape_or_array: Union[Shape, np.ndarray]) -> Shape:
+        if isinstance(shape_or_array, np.ndarray):
+            return shape_or_array.shape[:2]
+        return tuple(shape_or_array)
+
+    def _clipped_bound(self, shape: Shape) -> Tuple[int, int, int, int]:
+        """`.bound`, clamped to fit inside an array of `shape`."""
+        h, w = shape
+        r0, r1, c0, c1 = self.bound
+        return max(r0, 0), min(r1, h), max(c0, 0), min(c1, w)
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}({self.idx!r})"
+
+    # ---- Apply functions ----
+    def apply(self, image: np.ndarray, func: Callable = np.array, **kwargs):
+        """Apply functions only ever apply to the cropped region
+        Functions should be nan-compatuble
         """
-        Generate coordinates for plotting ROI.
+        kwargs.setdefault("fill", np.nan)
+        extra_kwargs = {k: v for k, v in kwargs.items() if k != "fill"}
+        return func(self.crop(image, fill=kwargs["fill"]), **extra_kwargs)
 
-        Returns
-        -------
-        tuple
-            (x_coords, y_coords) suitable for plt.plot()
-        """
-        pass
+    ### 0D
+    # Primary scalar production functions
+    # All set to be nan safe and propagate the axis flag to apply.
+    def mean(
+        self, image: np.ndarray, axis: int | Tuple | None = None
+    ) -> float | np.ndarray:
+        return self.apply(image, np.nanmean, axis=axis)
 
-    @abstractmethod
-    def image_coords(self) -> tuple:
-        """
-        Generate pixel indices for extracting ROI from an image array.
+    def std(
+        self, image: np.ndarray, axis: int | Tuple | None = None
+    ) -> float | np.ndarray:
+        return self.apply(image, np.nanstd, axis=axis)
 
-        Returns
-        -------
-        tuple
-            Indexing structure suitable for image[...]
-        """
-        pass
+    def sum(
+        self, image: np.ndarray, axis: int | Tuple | None = None
+    ) -> float | np.ndarray:
+        return self.apply(image, np.nansum, axis=axis)
 
-    @abstractmethod
-    def contains_point(self, x: float, y: float) -> bool:
-        """
-        Check if a point is contained within this ROI.
+    def median(
+        self, image: np.ndarray, axis: int | Tuple | None = None
+    ) -> float | np.ndarray:
+        return self.apply(image, np.nanmedian, axis=axis)
 
-        Parameters
-        ----------
-        x : float
-            X coordinate
-        y : float
-            Y coordinate
+    def min(
+        self, image: np.ndarray, axis: int | Tuple | None = None
+    ) -> float | np.ndarray:
+        return self.apply(image, np.nanmin, axis=axis)
 
-        Returns
-        -------
-        bool
-            True if point is in ROI
-        """
-        pass
+    def max(
+        self, image: np.ndarray, axis: int | Tuple | None = None
+    ) -> float | np.ndarray:
+        return self.apply(image, np.nanmax, axis=axis)
 
-    def _apply_func(self, im, func=np.mean) -> float:
-        """
-        Applies defined function to a supplied image within ROI region.
+    ### 1D
+    # At present these are handled by declaring axis=(...) in the 0D functions
+    # unclear if I need to add specifics at this point
 
-        Parameters
-        ----------
-        im : np.ndarray
-            Image array to process
-        func : callable
-            Function to apply (default: np.mean)
+    ### 2D
+    def rebin(self, image: np.ndarray, kernal: int = 3) -> np.ndarray:
 
-        Returns
-        -------
-        float
-            Output from func
-        """
-        y_slice, x_slice = self.image_coords()
-        return func(im[y_slice, x_slice])
+        image = self.apply(image)
 
-    def mean(self, im):
-        """Calculate mean value in ROI."""
-        return self._apply_func(im, np.mean)
+        if image.ndim != 2:
+            raise ValueError("im must be a 2D array")
+        if kernal <= 0:
+            raise ValueError("kernal must be > 0")
 
-    def max(self, im):
-        """Calculate maximum value in ROI."""
-        return self._apply_func(im, np.max)
+        h, w = image.shape
+        h2, w2 = h // kernal, w // kernal
+        if h2 == 0 or w2 == 0:
+            raise ValueError("image is too small for the requested kernal")
 
-    def min(self, im):
-        """Calculate minimum value in ROI."""
-        return self._apply_func(im, np.min)
+        # Drop any leftover rows/columns so the output is exactly (H//k, W//k)
+        image = image[: h2 * kernal, : w2 * kernal]
 
-    def std(self, im):
-        """Calculate standard deviation in ROI."""
-        return self._apply_func(im, np.std)
+        return np.mean(np.reshape(image, shape=(h2, kernal, w2, kernal)), axis=(1, 3))
 
-
-@dataclass
-class PolygonalROI(ROI_base):
-    """
-    Polygonal ROI defined by vertices.
-
-    Attributes
-    ----------
-    vertices : np.ndarray
-        Array of shape (N, 2) containing (x, y) coordinates of polygon vertices
-    idx : int, optional
-        Index/identifier for this ROI
-    """
-
-    vertices: np.ndarray | list = None
-    idx: int = None
-
-    def __post_init__(self):
-        """Ensure vertices is a numpy array."""
-        self.vertices = np.asarray(self.vertices)
-        if self.vertices.ndim != 2 or self.vertices.shape[1] != 2:
-            raise ValueError("vertices must be array of shape (N, 2)")
-
-    def plot_coords(self) -> tuple:
+    # ---- Plot ----
+    def plot(self, ax=None, **kwargs):
         """
         Generate coordinates for plotting polygonal ROI.
-
-        Returns
-        -------
-        tuple
-            (x_coords, y_coords) forming closed polygon
+        **kwargs are for matplotlib.pyplot kwargs
         """
         # Close the polygon by appending first vertex at end
         x_coords = self.vertices[:, 0]
         y_coords = self.vertices[:, 1]
+
+        if ax is None:
+            return x_coords, y_coords
+        else:
+            ax.plot(x_coords, y_coords, **kwargs)
+
+
+class PolyROI(ROI_BASE):
+    """Polygon ROI: an ordered list of (x, y) vertices with an idx."""
+
+    def __init__(self, vertices: Sequence[Tuple[float, float]], idx, image_size=None):
+        super().__init__(idx, image_size=image_size)
+        self.vertices = np.asarray(vertices, dtype=float)
+        self._close_vertices()
+
+        if self.image_size is not None:
+            self.mask(self.image_size)
+
+    def _close_vertices(self):
         if (self.vertices[0, 0] != self.vertices[-1, 0]) or (
             self.vertices[0, 1] != self.vertices[-1, 1]
         ):
-            x_coords = np.append(x_coords, self.vertices[0, 0])
-            y_coords = np.append(y_coords, self.vertices[0, 1])
+            self.vertices = np.vstack((self.vertices, self.vertices[0, :]))
 
-        return x_coords, y_coords
+    @property
+    def bound(self):
+        x, y = self.vertices[:, 0], self.vertices[:, 1]
+        return (
+            int(np.floor(y.min())),
+            int(np.ceil(y.max())) + 1,
+            int(np.floor(x.min())),
+            int(np.ceil(x.max())) + 1,
+        )
 
-    def image_coords(self, shape: tuple[int, int] | None = None) -> tuple:
-        """
-        Generate pixel coordinates for extracting polygonal ROI from image.
-        Uses rasterization to create a mask.
-
-        Returns
-        -------
-        tuple
-            (y_mask, x_mask) boolean arrays for polygonal region
-        """
-        from matplotlib.path import Path
-
-        if shape is None:
-            # Get bounding box
-            x_min, y_min = self.vertices.min(axis=0).astype(int)
-            x_max, y_max = self.vertices.max(axis=0).astype(int)
-
-            # Create coordinate grids
-            y_grid, x_grid = np.mgrid[y_min + 1 : y_max, x_min + 1 : x_max]
-        else:
-            y_grid, x_grid = np.mgrid[: shape[1], : shape[0]]
-
-        points = np.column_stack((x_grid.ravel(), y_grid.ravel()))
-
-        # Create polygon path and check containment
-        path = Path(self.vertices)
-        mask = path.contains_points(points).reshape(x_grid.shape)
-
-        return mask
-
-    def region(self, im) -> np.ndarray:
-        mask = self.image_coords()
-        x_min, y_min = self.vertices.min(axis=0).astype(int)
-
-        x_max = x_min + mask.shape[1]
-        y_max = y_min + mask.shape[0]
-
-        return im[y_min:y_max, x_min:x_max]
-
-    def _apply_func(self, im, func=np.mean) -> float:
-        """Override _apply_func for polygonal ROI using mask."""
-        mask = self.image_coords()
-        region = self.region(im)
-        return func(region[mask])
-
-    def contains_point(self, x: float, y: float) -> bool:
-        """Check if point is within polygonal ROI."""
-        from matplotlib.path import Path
-
-        path = Path(self.vertices)
-        return path.contains_point((x, y))
+    def mask(self, shape_or_array):
+        shape = self._as_shape(shape_or_array)
+        cached = self._cached_mask_for(shape)
+        if cached is not None:
+            return cached
+        h, w = shape
+        yy, xx = np.mgrid[0:h, 0:w]
+        points = np.column_stack((xx.ravel(), yy.ravel()))
+        inside = MplPath(self.vertices).contains_points(points)
+        return inside.reshape(h, w)
 
 
-@dataclass
-class RectangularROI(PolygonalROI):
-    x: int = 0
-    y: int = 0
-    h: int = 0
-    w: int = 0
-    idx: int = 0
-    vertices: np.ndarray | list = field(init=False)
+class CompositeROI(ROI_BASE):
+    """Boolean combination of two ROIs: union / difference / intersection.
 
-    def __post_init__(self):
-        x_min = self.x - self.w / 2
-        x_max = self.x + self.w / 2
-        y_min = self.y - self.h / 2
-        y_max = self.y + self.h / 2
+    Being an ROI itself, composites chain: `(a + b) - c` works, since each
+    intermediate result is just another object with `.bound` and `.mask`.
+    Left/right can be any ROI — PolyROI, another CompositeROI, or a future
+    mask-only ROI — the op only relies on the shared interface.
+    """
 
-        self.vertices = np.array(
+    _MASK_OPS = {
+        "union": lambda a, b: a | b,
+        "difference": lambda a, b: a & ~b,
+        "intersection": lambda a, b: a & b,
+    }
+
+    def __init__(
+        self, left: ROI_BASE, right: ROI_BASE, op: str, idx: Optional[str] = None
+    ):
+        if op not in self._MASK_OPS:
+            raise ValueError(f"op must be one of {list(self._MASK_OPS)}")
+        symbol = {"union": "+", "difference": "-", "intersection": "&"}[op]
+        super().__init__(idx or f"({left.idx} {symbol} {right.idx})")
+        self.left, self.right, self.op = left, right, op
+
+        # reset vertices for latter calls
+        self.vertices = np.vstack((self.left.vertices, self.right.vertices))
+
+    @property
+    def bound(self):
+        r0a, r1a, c0a, c1a = self.left.bound
+        if self.op == "difference":
+            return self.left.bound  # subtracting never grows the box
+        r0b, r1b, c0b, c1b = self.right.bound
+        if self.op == "union":
+            return (min(r0a, r0b), max(r1a, r1b), min(c0a, c0b), max(c1a, c1b))
+        return (
+            max(r0a, r0b),
+            min(r1a, r1b),
+            max(c0a, c0b),
+            min(c1a, c1b),
+        )  # intersection
+
+    def mask(self, shape_or_array):
+        shape = self._as_shape(shape_or_array)
+        cached = self._cached_mask_for(shape)
+        if cached is not None:
+            return cached
+        return self._MASK_OPS[self.op](self.left.mask(shape), self.right.mask(shape))
+
+
+#### Friendly ROIs for simple geometry generation
+class RectROI(PolyROI):
+    """
+    Special instance of Poly for generating rectangles
+    By default acts from centre out but can be generated from top-left corner with flag kind='corner'
+
+    Requires x,y,h,w to be defined
+    """
+
+    def __init__(
+        self,
+        x: int,
+        y: int,
+        h: int,
+        w: int,
+        idx: int | str | None = None,
+        kind: Literal["centre", "center", "origin", "corner"] = "centre",
+        image_size=None,
+    ):
+        self.x = x
+        self.y = y
+        self.h = h
+        self.w = w
+
+        match kind:
+            case k if k in ["centre", "center", "origin"]:
+                x_min = self.x - self.w / 2
+                x_max = self.x + self.w / 2
+                y_min = self.y - self.h / 2
+                y_max = self.y + self.h / 2
+
+            case k if k in ["corner"]:
+                x_min = self.x
+                x_max = self.x + self.w
+                y_min = self.y
+                y_max = self.y + self.h
+
+            case _:
+                raise ValueError(
+                    f"Unknown ROI kind: '{kind}'. Must be 'centre' or 'corner'"
+                )
+
+        vertices = np.array(
             [
                 [x_min, y_min],
                 [x_max, y_min],
@@ -295,22 +457,62 @@ class RectangularROI(PolygonalROI):
             ]
         )
 
+        super().__init__(vertices, idx, image_size=image_size)
 
-@dataclass
-class CircularROI(PolygonalROI):
-    x: int = 0
-    y: int = 0
-    r: int = 0
-    idx: int = 0
-    vertices: np.ndarray | list = field(init=False)
-
-    def __post_init__(self):
-        theta = np.linspace(0, 2 * np.pi, 100)
-        x_coords = self.x + self.r * np.cos(theta)
-        y_coords = self.y + self.r * np.sin(theta)
-
-        self.vertices = np.array([x_coords, y_coords]).T
+    @property
+    def bound(self):
+        x, y = self.vertices[:, 0], self.vertices[:, 1]
+        return (
+            int(np.floor(y.min())) + 1,
+            int(np.ceil(y.max())) + 1,
+            int(np.floor(x.min())),
+            int(np.ceil(x.max())),
+        )
 
 
-if __name__ == "__main__":
-    pass
+class EllipseROI(PolyROI):
+    """
+    Special instance of Poly for generating Circles
+
+    Requires x,y,r to be defined
+
+    """
+
+    def __init__(
+        self,
+        x: int,
+        y: int,
+        ra: int,
+        rb: int,
+        idx: int | str | None = None,
+        resolution: int = 100,
+        image_size=None,
+    ):
+        self.x = x
+        self.y = y
+        self.ra = ra
+        self.rb = rb
+
+        theta = np.linspace(0, 2 * np.pi, resolution)
+        x_coords = self.x + self.ra * np.cos(theta)
+        y_coords = self.y + self.rb * np.sin(theta)
+
+        vertices = np.array([x_coords, y_coords]).T
+        super().__init__(vertices, idx, image_size=image_size)
+
+
+class CircleROI(EllipseROI):
+    """
+    Special instance of Ellipse for generating Circles
+    """
+
+    def __init__(
+        self,
+        x: int,
+        y: int,
+        r: int,
+        idx: int | str | None = None,
+        resolution: int = 100,
+        image_size=None,
+    ):
+        super().__init__(x, y, r, r, idx, resolution, image_size=image_size)
