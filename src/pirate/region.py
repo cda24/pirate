@@ -22,7 +22,9 @@ class ROI:
             "circular",
             "poly",
             "ellipse",
-        ] = None,
+            "line",
+            "lineout",
+        ] = "polygon",
         idx: int | None = None,
         image_size: Shape | np.ndarray | None = None,
         **kwargs,
@@ -53,6 +55,9 @@ class ROI:
 
             case k if k in ["poly", "polygon"]:
                 return cls._create_poly(idx, **kwargs)
+
+            case k if k in ["line", "lineout"]:
+                return cls._create_lineout(idx, **kwargs)
 
             case _:
                 raise ValueError(
@@ -131,6 +136,31 @@ class ROI:
             ra=kwargs["ra"],
             rb=kwargs["rb"],
             resolution=kwargs["resolution"],
+            idx=idx,
+            image_size=kwargs["image_size"],
+        )
+
+    @staticmethod
+    def _create_lineout(idx: int | None = None, **kwargs):
+        """Create a Lineout."""
+        required = {"xo", "yo", "xp", "yp"}
+        provided = set(kwargs.keys())
+
+        if not required.issubset(provided):
+            missing = required - provided
+            raise ValueError(
+                f"LineoutROI requires parameters: {', '.join(sorted(required))}. "
+                f"Missing: {', '.join(sorted(missing))}"
+            )
+
+        kwargs.setdefault("width", 1)
+
+        return EllipseROI(
+            xo=kwargs["x"],
+            yo=kwargs["y"],
+            xp=kwargs["ra"],
+            yp=kwargs["rb"],
+            width=kwargs["width"],
             idx=idx,
             image_size=kwargs["image_size"],
         )
@@ -371,7 +401,7 @@ class CompositeROI(ROI_BASE):
     }
 
     def __init__(
-        self, left: ROI_BASE, right: ROI_BASE, op: str, idx: Optional[str] = None
+        self, left: ROI_BASE, right: ROI_BASE, op: str, idx: str | None = None
     ):
         if op not in self._MASK_OPS:
             raise ValueError(f"op must be one of {list(self._MASK_OPS)}")
@@ -406,6 +436,88 @@ class CompositeROI(ROI_BASE):
 
 
 #### Friendly ROIs for simple geometry generation
+
+
+class LineROI(PolyROI):
+    """
+    Special instance of Poly for generating rectangles
+    By default acts from centre out but can be generated from top-left corner with flag kind='corner'
+
+    Requires x,y,h,w to be defined
+    """
+
+    def __init__(
+        self,
+        xo: float,
+        yo: float,
+        xp: float,
+        yp: float,
+        width: float = 1,
+        idx: int | str | None = None,
+        image_size=None,
+    ):
+        self.xo, self.yo = float(xo), float(yo)
+        self.xp, self.yp = float(xp), float(yp)
+        self.width = float(width)
+
+        vertices = self._calculate_vertices()
+        super().__init__(vertices, idx, image_size=image_size)
+
+    def _calculate_vertices(self) -> np.ndarray:
+        start = np.array([self.xo, self.yo])
+        end = np.array([self.xp, self.yp])
+        direction = end - start
+        length = np.linalg.norm(direction)
+
+        if length == 0:
+            raise ValueError("Line endpoints must be different")
+        if self.width <= 0:
+            raise ValueError("width must be greater than zero")
+
+        self.angle = np.arctan2(direction[1], direction[0])
+        normal = np.array([-np.sin(self.angle), np.cos(self.angle)]) * (self.width / 2)
+
+        return np.array(
+            [
+                start - normal,
+                end - normal,
+                end + normal,
+                start + normal,
+                start - normal,
+            ]
+        )
+
+    def rotate(self, angle: float, degrees: bool = False) -> None:
+        """Rotate the line around its midpoint and recalculate its corners."""
+        if degrees:
+            angle = np.deg2rad(angle)
+
+        centre = np.array([(self.xo + self.xp) / 2, (self.yo + self.yp) / 2])
+        rotation = np.array(
+            [
+                [np.cos(angle), -np.sin(angle)],
+                [np.sin(angle), np.cos(angle)],
+            ]
+        )
+
+        start = centre + rotation @ (np.array([self.xo, self.yo]) - centre)
+        end = centre + rotation @ (np.array([self.xp, self.yp]) - centre)
+
+        self.xo, self.yo = start
+        self.xp, self.yp = end
+        self.vertices = self._calculate_vertices()
+
+    @property
+    def bound(self):
+        x, y = self.vertices[:, 0], self.vertices[:, 1]
+        return (
+            int(np.floor(y.min())) + 1,
+            int(np.ceil(y.max())) + 1,
+            int(np.floor(x.min())),
+            int(np.ceil(x.max())),
+        )
+
+
 class RectROI(PolyROI):
     """
     Special instance of Poly for generating rectangles
