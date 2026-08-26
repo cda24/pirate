@@ -513,14 +513,13 @@ class LineROI(PolyROI):
         self, image: np.ndarray, axis: int | tuple | None = None
     ) -> float | np.ndarray:
         if axis is None:
-            super().mean(image=image)
+            return super().mean(image=image)
         else:
-            print("in sub mean ")
             cropped = self.crop(image, fill=-1)
             rotated = _rotate(
                 cropped,
                 angle=-np.degrees(self.angle),
-                reshape=False,
+                reshape=True,
                 mode="constant",
                 cval=-1,
             )
@@ -529,6 +528,10 @@ class LineROI(PolyROI):
                 arr = arr.copy()
                 arr[arr <= 0] = np.nan
                 return arr
+
+            # ax = 0
+            # if np.abs(self.xo - self.xp) > np.abs(self.yo - self.yp):
+            #     ax = 1
 
             return np.nanmean(swap_negatives(rotated), axis=axis)
 
