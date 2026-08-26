@@ -4,7 +4,7 @@ platforms = ["win-64", "linux-64", "osx-arm64", "osx-64"]
 preview = ["pixi-build"]
 
 [dependencies] 
-python = ">3.11"
+python = ">3.12"
 pip = "*"
 
 [pypi-dependencies]

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Literal, Callable, Optional, Sequence, Tuple, Union
+from collections.abc import Callable, Sequence
+from typing import Literal
 
 import numpy as np
 from matplotlib.path import Path as MplPath
+from scipy.ndimage import rotate as _rotate
 
-Shape = Tuple[int, int]  # (rows, cols) == (H, W)
+type Shape = tuple[int, int]  # (rows, cols) == (H, W)
 
 
 class ROI:
@@ -155,11 +157,11 @@ class ROI:
 
         kwargs.setdefault("width", 1)
 
-        return EllipseROI(
-            xo=kwargs["x"],
-            yo=kwargs["y"],
-            xp=kwargs["ra"],
-            yp=kwargs["rb"],
+        return LineROI(
+            xo=kwargs["xo"],
+            yo=kwargs["yo"],
+            xp=kwargs["xp"],
+            yp=kwargs["yp"],
             width=kwargs["width"],
             idx=idx,
             image_size=kwargs["image_size"],
@@ -203,7 +205,7 @@ class ROI_BASE(ABC):
 
     @property
     @abstractmethod
-    def bound(self) -> Tuple[int, int, int, int]:
+    def bound(self) -> tuple[int, int, int, int]:
         """(row_min, row_max, col_min, col_max) — outer bounding rectangle.
 
         Pure geometry: derived only from the ROI's own definition, never
@@ -213,7 +215,7 @@ class ROI_BASE(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def mask(self, shape_or_array: Union[Shape, np.ndarray]) -> np.ndarray:
+    def mask(self, shape_or_array: Shape | np.ndarray) -> np.ndarray:
         """Boolean array, `shape_or_array`'s size, True inside the region."""
         raise NotImplementedError
 
@@ -239,23 +241,23 @@ class ROI_BASE(ABC):
         return sub
 
     # ---- composition: additive / subtractive / intersection ----
-    def __add__(self, other: "ROI_BASE") -> "CompositeROI":
+    def __add__(self, other: ROI_BASE) -> CompositeROI:
         return CompositeROI(self, other, "union")
 
-    def __sub__(self, other: "ROI_BASE") -> "CompositeROI":
+    def __sub__(self, other: ROI_BASE) -> CompositeROI:
         return CompositeROI(self, other, "difference")
 
-    def __and__(self, other: "ROI_BASE") -> "CompositeROI":
+    def __and__(self, other: ROI_BASE) -> CompositeROI:
         return CompositeROI(self, other, "intersection")
 
     # ---- small shared helpers ----
     @staticmethod
-    def _as_shape(shape_or_array: Union[Shape, np.ndarray]) -> Shape:
+    def _as_shape(shape_or_array: Shape | np.ndarray) -> Shape:
         if isinstance(shape_or_array, np.ndarray):
             return shape_or_array.shape[:2]
         return tuple(shape_or_array)
 
-    def _clipped_bound(self, shape: Shape) -> Tuple[int, int, int, int]:
+    def _clipped_bound(self, shape: Shape) -> tuple[int, int, int, int]:
         """`.bound`, clamped to fit inside an array of `shape`."""
         h, w = shape
         r0, r1, c0, c1 = self.bound
@@ -277,32 +279,32 @@ class ROI_BASE(ABC):
     # Primary scalar production functions
     # All set to be nan safe and propagate the axis flag to apply.
     def mean(
-        self, image: np.ndarray, axis: int | Tuple | None = None
+        self, image: np.ndarray, axis: int | tuple | None = None
     ) -> float | np.ndarray:
         return self.apply(image, np.nanmean, axis=axis)
 
     def std(
-        self, image: np.ndarray, axis: int | Tuple | None = None
+        self, image: np.ndarray, axis: int | tuple | None = None
     ) -> float | np.ndarray:
         return self.apply(image, np.nanstd, axis=axis)
 
     def sum(
-        self, image: np.ndarray, axis: int | Tuple | None = None
+        self, image: np.ndarray, axis: int | tuple | None = None
     ) -> float | np.ndarray:
         return self.apply(image, np.nansum, axis=axis)
 
     def median(
-        self, image: np.ndarray, axis: int | Tuple | None = None
+        self, image: np.ndarray, axis: int | tuple | None = None
     ) -> float | np.ndarray:
         return self.apply(image, np.nanmedian, axis=axis)
 
     def min(
-        self, image: np.ndarray, axis: int | Tuple | None = None
+        self, image: np.ndarray, axis: int | tuple | None = None
     ) -> float | np.ndarray:
         return self.apply(image, np.nanmin, axis=axis)
 
     def max(
-        self, image: np.ndarray, axis: int | Tuple | None = None
+        self, image: np.ndarray, axis: int | tuple | None = None
     ) -> float | np.ndarray:
         return self.apply(image, np.nanmax, axis=axis)
 
@@ -349,7 +351,7 @@ class ROI_BASE(ABC):
 class PolyROI(ROI_BASE):
     """Polygon ROI: an ordered list of (x, y) vertices with an idx."""
 
-    def __init__(self, vertices: Sequence[Tuple[float, float]], idx, image_size=None):
+    def __init__(self, vertices: Sequence[tuple[float, float]], idx, image_size=None):
         super().__init__(idx, image_size=image_size)
         self.vertices = np.asarray(vertices, dtype=float)
         self._close_vertices()
@@ -506,6 +508,29 @@ class LineROI(PolyROI):
         self.xo, self.yo = start
         self.xp, self.yp = end
         self.vertices = self._calculate_vertices()
+
+    def mean(
+        self, image: np.ndarray, axis: int | tuple | None = None
+    ) -> float | np.ndarray:
+        if axis is None:
+            super().mean(image=image)
+        else:
+            print("in sub mean ")
+            cropped = self.crop(image, fill=-1)
+            rotated = _rotate(
+                cropped,
+                angle=-np.degrees(self.angle),
+                reshape=False,
+                mode="constant",
+                cval=-1,
+            )
+
+            def swap_negatives(arr: np.ndarray):
+                arr = arr.copy()
+                arr[arr <= 0] = np.nan
+                return arr
+
+            return np.nanmean(swap_negatives(rotated), axis=axis)
 
     @property
     def bound(self):
