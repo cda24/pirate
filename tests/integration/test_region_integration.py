@@ -1,5 +1,6 @@
 ## Timing Tests
 import time
+
 import numpy as np
 
 from pirate.region import ROI

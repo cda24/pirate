@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Literal, Callable, Optional, Sequence, Tuple, Union
+from collections.abc import Callable, Sequence
+from typing import Literal
 
 import numpy as np
 from matplotlib.path import Path as MplPath
+from scipy.ndimage import rotate as _rotate
 
-Shape = Tuple[int, int]  # (rows, cols) == (H, W)
+type Shape = tuple[int, int]  # (rows, cols) == (H, W)
 
 
 class ROI:
@@ -22,7 +24,9 @@ class ROI:
             "circular",
             "poly",
             "ellipse",
-        ] = None,
+            "line",
+            "lineout",
+        ] = "polygon",
         idx: int | None = None,
         image_size: Shape | np.ndarray | None = None,
         **kwargs,
@@ -53,6 +57,9 @@ class ROI:
 
             case k if k in ["poly", "polygon"]:
                 return cls._create_poly(idx, **kwargs)
+
+            case k if k in ["line", "lineout"]:
+                return cls._create_lineout(idx, **kwargs)
 
             case _:
                 raise ValueError(
@@ -136,6 +143,31 @@ class ROI:
         )
 
     @staticmethod
+    def _create_lineout(idx: int | None = None, **kwargs):
+        """Create a Lineout."""
+        required = {"xo", "yo", "xp", "yp"}
+        provided = set(kwargs.keys())
+
+        if not required.issubset(provided):
+            missing = required - provided
+            raise ValueError(
+                f"LineoutROI requires parameters: {', '.join(sorted(required))}. "
+                f"Missing: {', '.join(sorted(missing))}"
+            )
+
+        kwargs.setdefault("width", 1)
+
+        return LineROI(
+            xo=kwargs["xo"],
+            yo=kwargs["yo"],
+            xp=kwargs["xp"],
+            yp=kwargs["yp"],
+            width=kwargs["width"],
+            idx=idx,
+            image_size=kwargs["image_size"],
+        )
+
+    @staticmethod
     def _create_poly(idx: int | None = None, **kwargs):
         if "vertices" not in kwargs:
             raise ValueError("PolyROI requires 'vertices' parameter as list or array")
@@ -173,7 +205,7 @@ class ROI_BASE(ABC):
 
     @property
     @abstractmethod
-    def bound(self) -> Tuple[int, int, int, int]:
+    def bound(self) -> tuple[int, int, int, int]:
         """(row_min, row_max, col_min, col_max) — outer bounding rectangle.
 
         Pure geometry: derived only from the ROI's own definition, never
@@ -183,7 +215,7 @@ class ROI_BASE(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def mask(self, shape_or_array: Union[Shape, np.ndarray]) -> np.ndarray:
+    def mask(self, shape_or_array: Shape | np.ndarray) -> np.ndarray:
         """Boolean array, `shape_or_array`'s size, True inside the region."""
         raise NotImplementedError
 
@@ -209,23 +241,23 @@ class ROI_BASE(ABC):
         return sub
 
     # ---- composition: additive / subtractive / intersection ----
-    def __add__(self, other: "ROI_BASE") -> "CompositeROI":
+    def __add__(self, other: ROI_BASE) -> CompositeROI:
         return CompositeROI(self, other, "union")
 
-    def __sub__(self, other: "ROI_BASE") -> "CompositeROI":
+    def __sub__(self, other: ROI_BASE) -> CompositeROI:
         return CompositeROI(self, other, "difference")
 
-    def __and__(self, other: "ROI_BASE") -> "CompositeROI":
+    def __and__(self, other: ROI_BASE) -> CompositeROI:
         return CompositeROI(self, other, "intersection")
 
     # ---- small shared helpers ----
     @staticmethod
-    def _as_shape(shape_or_array: Union[Shape, np.ndarray]) -> Shape:
+    def _as_shape(shape_or_array: Shape | np.ndarray) -> Shape:
         if isinstance(shape_or_array, np.ndarray):
             return shape_or_array.shape[:2]
         return tuple(shape_or_array)
 
-    def _clipped_bound(self, shape: Shape) -> Tuple[int, int, int, int]:
+    def _clipped_bound(self, shape: Shape) -> tuple[int, int, int, int]:
         """`.bound`, clamped to fit inside an array of `shape`."""
         h, w = shape
         r0, r1, c0, c1 = self.bound
@@ -247,32 +279,32 @@ class ROI_BASE(ABC):
     # Primary scalar production functions
     # All set to be nan safe and propagate the axis flag to apply.
     def mean(
-        self, image: np.ndarray, axis: int | Tuple | None = None
+        self, image: np.ndarray, axis: int | tuple | None = None
     ) -> float | np.ndarray:
         return self.apply(image, np.nanmean, axis=axis)
 
     def std(
-        self, image: np.ndarray, axis: int | Tuple | None = None
+        self, image: np.ndarray, axis: int | tuple | None = None
     ) -> float | np.ndarray:
         return self.apply(image, np.nanstd, axis=axis)
 
     def sum(
-        self, image: np.ndarray, axis: int | Tuple | None = None
+        self, image: np.ndarray, axis: int | tuple | None = None
     ) -> float | np.ndarray:
         return self.apply(image, np.nansum, axis=axis)
 
     def median(
-        self, image: np.ndarray, axis: int | Tuple | None = None
+        self, image: np.ndarray, axis: int | tuple | None = None
     ) -> float | np.ndarray:
         return self.apply(image, np.nanmedian, axis=axis)
 
     def min(
-        self, image: np.ndarray, axis: int | Tuple | None = None
+        self, image: np.ndarray, axis: int | tuple | None = None
     ) -> float | np.ndarray:
         return self.apply(image, np.nanmin, axis=axis)
 
     def max(
-        self, image: np.ndarray, axis: int | Tuple | None = None
+        self, image: np.ndarray, axis: int | tuple | None = None
     ) -> float | np.ndarray:
         return self.apply(image, np.nanmax, axis=axis)
 
@@ -319,7 +351,7 @@ class ROI_BASE(ABC):
 class PolyROI(ROI_BASE):
     """Polygon ROI: an ordered list of (x, y) vertices with an idx."""
 
-    def __init__(self, vertices: Sequence[Tuple[float, float]], idx, image_size=None):
+    def __init__(self, vertices: Sequence[tuple[float, float]], idx, image_size=None):
         super().__init__(idx, image_size=image_size)
         self.vertices = np.asarray(vertices, dtype=float)
         self._close_vertices()
@@ -371,7 +403,7 @@ class CompositeROI(ROI_BASE):
     }
 
     def __init__(
-        self, left: ROI_BASE, right: ROI_BASE, op: str, idx: Optional[str] = None
+        self, left: ROI_BASE, right: ROI_BASE, op: str, idx: str | None = None
     ):
         if op not in self._MASK_OPS:
             raise ValueError(f"op must be one of {list(self._MASK_OPS)}")
@@ -406,6 +438,114 @@ class CompositeROI(ROI_BASE):
 
 
 #### Friendly ROIs for simple geometry generation
+
+
+class LineROI(PolyROI):
+    """
+    Special instance of Poly for generating rectangles
+    By default acts from centre out but can be generated from top-left corner with flag kind='corner'
+
+    Requires x,y,h,w to be defined
+    """
+
+    def __init__(
+        self,
+        xo: float,
+        yo: float,
+        xp: float,
+        yp: float,
+        width: float = 1,
+        idx: int | str | None = None,
+        image_size=None,
+    ):
+        self.xo, self.yo = float(xo), float(yo)
+        self.xp, self.yp = float(xp), float(yp)
+        self.width = float(width)
+
+        vertices = self._calculate_vertices()
+        super().__init__(vertices, idx, image_size=image_size)
+
+    def _calculate_vertices(self) -> np.ndarray:
+        start = np.array([self.xo, self.yo])
+        end = np.array([self.xp, self.yp])
+        direction = end - start
+        length = np.linalg.norm(direction)
+
+        if length == 0:
+            raise ValueError("Line endpoints must be different")
+        if self.width <= 0:
+            raise ValueError("width must be greater than zero")
+
+        self.angle = np.arctan2(direction[1], direction[0])
+        normal = np.array([-np.sin(self.angle), np.cos(self.angle)]) * (self.width / 2)
+
+        return np.array(
+            [
+                start - normal,
+                end - normal,
+                end + normal,
+                start + normal,
+                start - normal,
+            ]
+        )
+
+    def rotate(self, angle: float, degrees: bool = False) -> None:
+        """Rotate the line around its midpoint and recalculate its corners."""
+        if degrees:
+            angle = np.deg2rad(angle)
+
+        centre = np.array([(self.xo + self.xp) / 2, (self.yo + self.yp) / 2])
+        rotation = np.array(
+            [
+                [np.cos(angle), -np.sin(angle)],
+                [np.sin(angle), np.cos(angle)],
+            ]
+        )
+
+        start = centre + rotation @ (np.array([self.xo, self.yo]) - centre)
+        end = centre + rotation @ (np.array([self.xp, self.yp]) - centre)
+
+        self.xo, self.yo = start
+        self.xp, self.yp = end
+        self.vertices = self._calculate_vertices()
+
+    def mean(
+        self, image: np.ndarray, axis: int | tuple | None = None
+    ) -> float | np.ndarray:
+        if axis is None:
+            return super().mean(image=image)
+        else:
+            cropped = self.crop(image, fill=-1)
+            rotated = _rotate(
+                cropped,
+                angle=-np.degrees(self.angle),
+                reshape=True,
+                mode="constant",
+                cval=-1,
+            )
+
+            def swap_negatives(arr: np.ndarray):
+                arr = arr.copy()
+                arr[arr <= 0] = np.nan
+                return arr
+
+            # ax = 0
+            # if np.abs(self.xo - self.xp) > np.abs(self.yo - self.yp):
+            #     ax = 1
+
+            return np.nanmean(swap_negatives(rotated), axis=axis)
+
+    @property
+    def bound(self):
+        x, y = self.vertices[:, 0], self.vertices[:, 1]
+        return (
+            int(np.floor(y.min())) + 1,
+            int(np.ceil(y.max())) + 1,
+            int(np.floor(x.min())),
+            int(np.ceil(x.max())),
+        )
+
+
 class RectROI(PolyROI):
     """
     Special instance of Poly for generating rectangles
